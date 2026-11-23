@@ -1,0 +1,76 @@
+name: Decode incoming ads
+
+on:
+  push:
+    paths:
+      - "incoming/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  decode:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Decode base64 images into stories/
+        run: |
+          set -euo pipefail
+          mkdir -p stories
+          shopt -s nullglob
+
+          decoded_any=0
+
+          # Join numbered parts when a .done marker lists the part count.
+          for done in incoming/*.b64.done; do
+            stem="${done%.done}"
+            count=$(tr -d '[:space:]' < "$done")
+            if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+              echo "Skipping $done: invalid count"
+              continue
+            fi
+            files=()
+            missing=0
+            for i in $(seq 1 "$count"); do
+              part=$(printf '%s.part%02d' "$stem" "$i")
+              if [[ ! -f "$part" ]]; then
+                echo "Incomplete set for $stem: missing $part"
+                missing=1
+                break
+              fi
+              files+=("$part")
+            done
+            if [[ "$missing" -eq 1 ]]; then
+              continue
+            fi
+            cat "${files[@]}" > "$stem"
+            rm -f "${files[@]}" "$done"
+          done
+
+          for f in incoming/*.b64; do
+            name="$(basename "$f" .b64)"
+            echo "Decoding $name"
+            base64 -d "$f" > "stories/${name}"
+            # Confirm a PNG signature so we never commit a truncated file.
+            python3 -c "import pathlib,sys; d=pathlib.Path(sys.argv[1]).read_bytes()[:8]; sys.exit(0 if d==b'\\x89PNG\\r\\n\\x1a\\n' else 1)" "stories/${name}"
+            rm -f "$f"
+            decoded_any=1
+          done
+
+          if [[ "$decoded_any" -eq 0 ]]; then
+            echo "Nothing complete to decode yet"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Decode incoming ad images into stories/"
+          git push
